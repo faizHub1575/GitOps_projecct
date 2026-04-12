@@ -35,11 +35,11 @@ A modern banking application with an integrated AI chatbot, deployed on AWS EKS 
 
 ## Architecture
 
-```
-Developer Push ──► GitHub Actions CI ──► DockerHub ──► ArgoCD ──► EKS Cluster
-                                                         ↑
-                                               watches k8s/ manifests
-```
+<div align="center">
+
+![GitOps Pipeline](screenshots/gitops-pipeline.gif)
+
+</div>
 
 | Layer | Tool |
 |-------|------|
