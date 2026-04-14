@@ -272,14 +272,27 @@ Set in repo → Settings → Secrets → Actions:
 
 ## 11. Cleanup
 
+> **Order matters** — Helm releases create AWS Load Balancers outside Terraform.
+> Delete them first or `terraform destroy` will hang on VPC deletion.
+
 ```bash
-# Delete ArgoCD app first (removes k8s resources)
+# 1. Delete ArgoCD app (removes Gateway → NLB)
 kubectl delete -f argocd/application.yml
 
-# Destroy all infrastructure
+# 2. Uninstall Helm releases
+helm uninstall cert-manager -n cert-manager
+helm uninstall kube-prometheus -n monitoring
+helm uninstall eg -n envoy-gateway-system
+
+# 3. Wait for LBs to terminate
+sleep 60
+
+# 4. Destroy infrastructure
 cd terraform
 terraform destroy
 ```
+
+See [`DEPLOYMENT.md`](../DEPLOYMENT.md#cleanup) for detailed cleanup steps and troubleshooting if VPC deletion gets stuck.
 
 ## Project Structure
 

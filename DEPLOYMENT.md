@@ -175,16 +175,49 @@ kubectl exec -n bankapp deploy/ollama -- ollama pull tinyllama
 
 ## Cleanup
 
+> **ORDER MATTERS.** Helm-installed resources (Envoy Gateway, Grafana) create AWS Load Balancers
+> and Security Groups outside of Terraform. If you run `terraform destroy` first, the EKS cluster
+> is gone but those orphaned resources block VPC deletion. Always clean up in this order:
+
 ```bash
-# Delete app from ArgoCD first
+# 1. Delete ArgoCD app (removes Gateway → deletes Envoy Gateway NLB)
 kubectl delete -f argocd/application.yml
 
-# Uninstall Helm releases
+# 2. Uninstall all Helm releases that created LoadBalancers/resources
+helm uninstall cert-manager -n cert-manager
 helm uninstall kube-prometheus -n monitoring
 helm uninstall eg -n envoy-gateway-system
 
-# Destroy infrastructure
+# 3. Delete Gateway API CRDs
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+
+# 4. Wait for Load Balancers to fully terminate (~30-60 seconds)
+echo "Waiting for LBs to terminate..."
+sleep 60
+
+# 5. Verify no Load Balancers remain in the VPC
+aws elb describe-load-balancers --region us-west-2 \
+  --query 'LoadBalancerDescriptions[*].LoadBalancerName' --output text
+# Should be empty. If not, delete manually:
+# aws elb delete-load-balancer --load-balancer-name <name> --region us-west-2
+
+# 6. Destroy infrastructure
 cd terraform
+terraform destroy
+```
+
+**If `terraform destroy` gets stuck on VPC deletion**, orphaned resources remain:
+```bash
+# Find and delete orphaned security groups
+aws ec2 describe-security-groups --region us-west-2 \
+  --filters Name=vpc-id,Values=<VPC_ID> \
+  --query 'SecurityGroups[?GroupName!=`default`].[GroupId,GroupName]' --output table
+aws ec2 delete-security-group --group-id <SG_ID> --region us-west-2
+
+# Then delete the VPC manually
+aws ec2 delete-vpc --vpc-id <VPC_ID> --region us-west-2
+
+# Re-run terraform destroy to clean the state
 terraform destroy
 ```
 
@@ -222,7 +255,12 @@ kubectl rollout restart deployment envoy-gateway -n envoy-gateway-system
 **Cause:** Envoy Gateway bypasses K8s Service `sessionAffinity: ClientIP` and load-balances directly to pod endpoints. With in-memory sessions, GET /login hits pod A (creates CSRF token), POST /login hits pod B (CSRF mismatch → silent redirect to /login).
 **Fix:** Add `BackendTrafficPolicy` with cookie-based consistent hashing (in `k8s/gateway.yml`) and `SERVER_FORWARD_HEADERS_STRATEGY=native` in configmap.
 
-### 6. ArgoCD Shows OutOfSync After Manual Rollout Restart
+### 6. `terraform destroy` Stuck on VPC Deletion
+**Symptom:** `terraform destroy` hangs on VPC delete with `DependencyViolation`.
+**Cause:** Helm-installed resources (Envoy Gateway, Grafana LB) created AWS Load Balancers and Security Groups outside Terraform. When EKS is destroyed first, these orphan and block VPC deletion.
+**Fix:** Always uninstall Helm releases and delete the ArgoCD app BEFORE running `terraform destroy`. If already stuck, delete orphaned ELBs and SGs via AWS CLI (see Cleanup section above).
+
+### 7. ArgoCD Shows OutOfSync After Manual Rollout Restart
 **Symptom:** ArgoCD status shows `OutOfSync` even though app is healthy.
 **Cause:** `kubectl rollout restart` adds a restartedAt annotation that doesn't match the Git manifest.
 **Fix:** Not a problem — next CI push updates the manifest and ArgoCD syncs to it, resolving the drift.
